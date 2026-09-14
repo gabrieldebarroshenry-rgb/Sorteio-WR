@@ -1,5 +1,5 @@
 // api/create-pix.js
-// Gera um PIX único (PagBank) para um número do sorteio e já reserva
+// Gera um PIX único (Mercado Pago) para um número do sorteio e já reserva
 // esse número no Firebase enquanto o pagamento não é confirmado.
 
 import { initializeApp, getApps } from 'firebase/app';
@@ -16,10 +16,6 @@ const firebaseConfig = {
 
 const PRICE = 20;
 const RAFFLE_DOC_PATH = ['sorteios', 'wrdocorte-1000'];
-
-// Troque para a URL de sandbox (https://sandbox.api.pagseguro.com/orders)
-// enquanto estiver testando com o token de sandbox do PagBank.
-const PAGBANK_API_URL = 'https://api.pagseguro.com/orders';
 
 function getDb() {
   const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
@@ -45,41 +41,36 @@ export default async function handler(req, res) {
     return res.status(409).json({ error: 'Esse número já está reservado ou vendido' });
   }
 
-  // Cria o pedido com PIX no PagBank
-  let order;
+  // Cria o pagamento PIX no Mercado Pago
+  let payment;
   try {
-    const pbRes = await fetch(PAGBANK_API_URL, {
+    const mpRes = await fetch('https://api.mercadopago.com/v1/payments', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${process.env.PAGBANK_TOKEN}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': `${number}-${Date.now()}`
       },
       body: JSON.stringify({
-        reference_id: `numero-${number}-${Date.now()}`,
-        customer: { name },
-        items: [
-          { name: `Sorteio WR DO CORTE - número ${number}`, quantity: 1, unit_amount: PRICE * 100 }
-        ],
-        qr_codes: [
-          { amount: { value: PRICE * 100 } }
-        ],
-        notification_urls: [`${process.env.PUBLIC_URL}/api/webhook`]
+        transaction_amount: PRICE,
+        description: `Sorteio WR DO CORTE - número ${number}`,
+        payment_method_id: 'pix',
+        payer: { email: 'comprador@sorteio.com', first_name: name },
+        external_reference: number,
+        notification_url: `${process.env.PUBLIC_URL}/api/webhook`
       })
     });
-    order = await pbRes.json();
-    if (!pbRes.ok) {
-      console.error('Erro PagBank:', order);
-      return res.status(502).json({ error: 'Erro ao gerar o PIX no PagBank' });
+    payment = await mpRes.json();
+    if (!mpRes.ok) {
+      console.error('Erro Mercado Pago:', payment);
+      return res.status(502).json({ error: 'Erro ao gerar o PIX no Mercado Pago' });
     }
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: 'Erro de conexão com o PagBank' });
+    return res.status(500).json({ error: 'Erro de conexão com o Mercado Pago' });
   }
 
-  const qrCode = order.qr_codes?.[0];
-  const copiaCola = qrCode?.text;
-
-  // Reserva o número no Firebase, já vinculado ao pedido gerado
+  // Reserva o número no Firebase, já vinculado ao pagamento gerado
   await setDoc(
     docRef,
     {
@@ -87,7 +78,7 @@ export default async function handler(req, res) {
         status: 'aguardando_pagamento',
         name,
         contact,
-        orderId: order.id,
+        paymentId: payment.id,
         reservedAt: Date.now()
       }
     },
@@ -95,7 +86,7 @@ export default async function handler(req, res) {
   );
 
   return res.status(200).json({
-    orderId: order.id,
-    copiaCola
+    paymentId: payment.id,
+    copiaCola: payment.point_of_interaction?.transaction_data?.qr_code
   });
 }
