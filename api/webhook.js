@@ -1,7 +1,7 @@
 // api/webhook.js
-// O PagBank chama essa URL sozinho assim que um pedido muda de status.
-// Se o pagamento foi aprovado (PAID), marcamos o número como "vendido"
-// no Firebase automaticamente - sem o Wesley precisar clicar em nada.
+// O Mercado Pago chama essa URL sozinho assim que um pagamento muda de status.
+// Se o pagamento foi aprovado, marcamos o número como "vendido" no Firebase
+// automaticamente - sem o Wesley precisar clicar em nada.
 
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, doc, getDoc, setDoc } from 'firebase/firestore';
@@ -16,44 +16,36 @@ const firebaseConfig = {
 };
 
 const RAFFLE_DOC_PATH = ['sorteios', 'wrdocorte-1000'];
-const PAGBANK_ORDERS_URL = 'https://api.pagseguro.com/orders';
 
 function getDb() {
   const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
   return getFirestore(app);
 }
 
-function findReservedNumber(data, orderId) {
-  return Object.entries(data).find(([, entry]) => entry.orderId === orderId)?.[0];
-}
-
 export default async function handler(req, res) {
-  // O PagBank costuma mandar o id do pedido no corpo da notificação.
-  // Se o formato vier diferente, dá pra ajustar aqui depois de ver
-  // o payload real chegando (loga no console pra conferir).
-  console.log('Webhook recebido:', JSON.stringify(req.body));
+  console.log('Webhook recebido:', JSON.stringify(req.body), JSON.stringify(req.query));
 
-  const orderId = req.body?.id || req.body?.order_id || req.body?.notificationCode;
+  // O Mercado Pago manda o id do pagamento no corpo ou na query, dependendo do evento
+  const paymentId = req.body?.data?.id || req.query['data.id'] || req.query.id;
 
-  if (!orderId) {
-    return res.status(200).send('sem id de pedido, ignorando');
+  if (!paymentId) {
+    return res.status(200).send('sem id de pagamento, ignorando');
   }
 
   try {
-    const pbRes = await fetch(`${PAGBANK_ORDERS_URL}/${orderId}`, {
-      headers: { Authorization: `Bearer ${process.env.PAGBANK_TOKEN}` }
+    const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+      headers: { Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}` }
     });
-    const order = await pbRes.json();
-    const status = order.charges?.[0]?.status;
+    const payment = await mpRes.json();
 
-    if (status === 'PAID') {
+    if (payment.status === 'approved') {
+      const number = payment.external_reference;
       const db = getDb();
       const docRef = doc(db, ...RAFFLE_DOC_PATH);
       const snap = await getDoc(docRef);
       const data = snap.exists() ? snap.data() : {};
 
-      const number = findReservedNumber(data, orderId);
-      if (number && data[number].status !== 'vendido') {
+      if (data[number] && data[number].status !== 'vendido') {
         await setDoc(
           docRef,
           { [number]: { ...data[number], status: 'vendido', confirmedAt: Date.now() } },
@@ -65,6 +57,6 @@ export default async function handler(req, res) {
     console.error('Erro no webhook:', e);
   }
 
-  // Sempre responde 200, senão o PagBank fica tentando de novo
+  // Sempre responde 200, senão o Mercado Pago fica tentando de novo
   res.status(200).send('ok');
 }
